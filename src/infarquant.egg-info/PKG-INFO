@@ -1,0 +1,105 @@
+Metadata-Version: 2.4
+Name: infarquant
+Version: 0.1.0
+Summary: InfarQuant GUI for infarct preprocessing and interactive ROI analysis.
+Author: MA
+License: MIT
+Keywords: ihc,infarct,pyqt,opencv,image-analysis
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Topic :: Scientific/Engineering :: Image Processing
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: PyQt5
+Requires-Dist: opencv-python
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: tifffile
+Requires-Dist: pyautogui
+Requires-Dist: pytest>=7.0
+Provides-Extra: dev
+Dynamic: license-file
+
+# InfarQuant
+
+Desktop app for preprocessing brain IHC slide images and interactively quantifying infarct regions (PyQt5 + OpenCV).
+
+This project is GUI-only: preprocessing and analysis are interactive workflows.
+
+![InfarQuant Logo](docs/infarquant_logo.png)
+
+## What this app does
+- Preprocesses whole-slide TIFF inputs into per-section reference/infarct image pairs.
+- Runs interactive analysis with midline, ROI, and threshold controls.
+- Exports per-section and aggregated CSV output tables.
+
+## Screenshots
+These screenshots are documentation assets only (not runtime files).
+
+![Main Window](docs/screenshots/main-window.png)
+![Preprocess Tab](docs/screenshots/preprocess-tab.png)
+![Analysis Tab](docs/screenshots/analysis-tab.png)
+![ROI Workflow](docs/screenshots/roi-workflow.png)
+![Results Table](docs/screenshots/results-table.png)
+
+## Installation
+Python `3.10+` is recommended.
+
+Conda (recommended):
+
+```bash
+conda create -n infarquant python=3.10 -y
+conda activate infarquant
+pip install -e .
+```
+
+Or pip only:
+
+```bash
+pip install -e .
+```
+
+If you prefer a plain requirements install:
+
+```bash
+pip install -r requirements.txt
+```
+
+## Run
+Preferred launcher:
+
+```bash
+python -m infarquant
+```
+
+## Workflow Overview
+1. Open the `Preprocess` tab.
+2. Select your slide folder and set preprocessing parameters.
+3. Run preprocessing to generate `preprocessed_sections/` outputs and metadata CSV.
+4. Open the `Analyze` tab and select the generated sections folder.
+5. Complete interactive ROI/midline/threshold steps in OpenCV windows.
+6. Export final results CSV.
+
+## Outputs
+- Preprocessing metadata CSV:
+  - `preprocessed_detect_<color>.csv`
+- Analysis results CSV:
+  - `results_detect_<channels>_<method>.csv`
+
+## Tests
+Run:
+
+```bash
+python -m pip install -e .
+python -m pytest -q tests
+```
+
+Qt tests run headless with `QT_QPA_PLATFORM=offscreen` (configured in `tests/conftest.py`).
+
+## Sample Data
+`docs/sample-data/` is intentionally a placeholder directory right now. Formatted sample data can be added there later.

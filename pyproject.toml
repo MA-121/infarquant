@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "infarquant"
+version = "0.1.0"
+description = "InfarQuant GUI for infarct preprocessing and interactive ROI analysis."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "MA" }
+]
+dependencies = [
+  "PyQt5",
+  "opencv-python",
+  "numpy",
+  "pandas",
+  "tifffile",
+  "pyautogui",
+  "pytest>=7.0"
+]
+keywords = ["ihc", "infarct", "pyqt", "opencv", "image-analysis"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering :: Image Processing"
+]
+
+[project.scripts]
+infarquant = "infarquant.app:launch_gui"
+
+[project.optional-dependencies]
+dev = []
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]

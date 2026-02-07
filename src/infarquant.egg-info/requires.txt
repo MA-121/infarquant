@@ -1,0 +1,9 @@
+PyQt5
+opencv-python
+numpy
+pandas
+tifffile
+pyautogui
+pytest>=7.0
+
+[dev]
