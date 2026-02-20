@@ -1,5 +1,3 @@
-# InfarQuant
-
 ![InfarQuant Logo](docs/infarquant_logo.png)
 
 InfarQuant is a desktop GUI for immunohistochemistry (IHC) infarct analysis.
