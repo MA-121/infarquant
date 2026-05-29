@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import traceback
 from pathlib import Path
 from typing import Optional, Tuple
@@ -51,9 +52,13 @@ from .preprocess import process_folder
 
 
 def _resolve_logo_path() -> str:
-    """Resolve logo path for local repo and editable installs."""
+    """Resolve logo path for repo, editable installs, and frozen exe."""
     here = Path(__file__).resolve()
-    candidates = [
+    candidates = []
+    base = getattr(sys, "_MEIPASS", None)  # set by PyInstaller at runtime
+    if base:
+        candidates.append(Path(base) / "docs" / "infarquant_logo.png")
+    candidates += [
         here.parents[2] / "docs" / "infarquant_logo.png",
         Path.cwd() / "docs" / "infarquant_logo.png",
     ]

@@ -90,6 +90,16 @@ You can also run via script entry point after install:
 infarquant
 ```
 
+## Build a standalone .exe (Windows)
+
+Produces a portable executable so users can run InfarQuant without Python. From the activated `infarquant` env:
+
+```powershell
+python -m pip install pyinstaller pillow
+.\build_exe.ps1            # single portable dist\InfarQuant.exe
+.\build_exe.ps1 -OneFolder # faster dist\InfarQuant\ folder build
+```
+
 ## How to use
 
 1. Open app -> `Preprocess` tab.
