@@ -3,5 +3,6 @@ opencv-python
 numpy
 pandas
 tifffile
+imagecodecs
 pyautogui
 pytest

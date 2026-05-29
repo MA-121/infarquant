@@ -41,12 +41,15 @@ from PyQt5.QtWidgets import (
 )
 
 from .analysis import (
+    COLOR_TO_BGR_INDEX,
+    ChannelValidationError,
     DRAW_THICKNESS,
     draw_dashed_polyline,
     get_largest_contour,
     qt_process_images,
     segment_image_by_hsv,
     split_image,
+    validate_channel_selection,
 )
 from .preprocess import process_folder
 
@@ -747,9 +750,8 @@ class AnalysisWorkspace(QWidget):
     ):
         """Interactive infarct segmentation using in-app controls."""
         self._set_status(f"Infarct: {display_info}")
-        COLOR_MAP = {"blue": 0, "green": 1, "red": 2}
-        cd68_idx = COLOR_MAP.get(cd68_color, 1)
-        exclude_idx = COLOR_MAP.get(exclude_color, 2)
+        cd68_idx = COLOR_TO_BGR_INDEX.get(cd68_color, 1)
+        exclude_idx = COLOR_TO_BGR_INDEX.get(exclude_color, 2)
         roi_fixed = fixed_roi_data is not None
         fixed_poly_norm = None
         fixed_centroid_norm = None
@@ -1528,18 +1530,20 @@ class PreprocessTab(QWidget):
             )
             self._reset_preprocess_button()
             return
-        # Write or update metadata CSV inside the output folder
-        # The metadata file name includes the infarct channel color (from the analysis tab) for clarity
+        # Write or update metadata CSV inside the output folder. The file name
+        # encodes the ACTUAL preprocess inputs -- the reference (contour) keyword
+        # and the infarct/detection keyword -- so it's clear how the data was
+        # processed, e.g. "preprocessed_ref-merge_detect-CD68.csv".
         import pandas as pd
-        color_label = ""
-        if self.analysis_tab is not None and hasattr(self.analysis_tab, "cd68_combo"):
-            try:
-                color_label = self.analysis_tab.cd68_combo.currentText().strip().lower()
-            except Exception:
-                color_label = ""
-        if not color_label:
-            color_label = infarct_kw.strip().lower()
-        metadata_filename = f"preprocessed_detect_{color_label}.csv"
+        import re as _re
+
+        def _slug(value: str, fallback: str) -> str:
+            slug = _re.sub(r"[^0-9A-Za-z]+", "", (value or "").strip())
+            return slug if slug else fallback
+
+        ref_label = _slug(contour_kw, "ref")
+        det_label = _slug(infarct_kw, "detect")
+        metadata_filename = f"preprocessed_ref-{ref_label}_detect-{det_label}.csv"
         metadata_path = os.path.join(output_folder, metadata_filename)
         df_new = pd.DataFrame(metadata_rows)
         # Merge with existing metadata if present to avoid duplicate entries
@@ -1698,7 +1702,7 @@ class AnalysisTab(QWidget):
         self.exclude_combo = QComboBox()
         # Allow 'None' option so exclusion can be disabled
         self.exclude_combo.addItems(["red", "green", "blue", "none"])
-        self.exclude_combo.setCurrentText("green")
+        self.exclude_combo.setCurrentText("none")
         exclude_help = QToolButton()
         exclude_help.setText("?")
         exclude_help.setStyleSheet(
@@ -1984,6 +1988,64 @@ class AnalysisTab(QWidget):
                 QMessageBox.warning(self, "Invalid background %", "Background percent must be a numeric value.")
                 return
         QApplication.processEvents()
+        # --- Data-driven channel validation gate --------------------------------
+        # Before processing every section, confirm the chosen CD68/exclude colours
+        # map to usable planes of the ACTUAL images: hard-stop on non-3-channel
+        # images, warn (Proceed/Cancel) if a selected plane has no signal. Runs
+        # once on the first section. See analysis.validate_channel_selection.
+        import re as _re_chk
+        _sample_ref = None
+        try:
+            for _af in sorted(os.listdir(self.base_path)):
+                _sf = os.path.join(self.base_path, _af)
+                if not os.path.isdir(_sf):
+                    continue
+                _refs = sorted(
+                    fn for fn in os.listdir(_sf)
+                    if fn.lower().endswith((".tif", ".tiff", ".png", ".jpg", ".jpeg"))
+                    and "reference" in fn.lower()
+                )
+                if _refs:
+                    _sample_ref = os.path.join(_sf, _refs[0])
+                    break
+        except Exception:
+            _sample_ref = None
+        if _sample_ref is not None:
+            _inf_name = _re_chk.sub(r"reference", "infarct", os.path.basename(_sample_ref), flags=_re_chk.IGNORECASE)
+            _inf_path = os.path.join(os.path.dirname(_sample_ref), _inf_name)
+            _has_inf = os.path.exists(_inf_path)
+            _ref_img = cv2.imread(_sample_ref)
+            _inf_img = cv2.imread(_inf_path) if _has_inf else _ref_img
+            if _inf_img is None:
+                _inf_img = _ref_img
+            # Only validate if the sample read OK; the per-section step reports read errors itself.
+            if _ref_img is not None:
+                _warnings = []
+                try:
+                    _, _w1 = validate_channel_selection(
+                        _inf_img, cd68_color,
+                        tiff_path=(_inf_path if _has_inf else _sample_ref),
+                        role="CD68 channel",
+                    )
+                    if _w1:
+                        _warnings.append(_w1)
+                    _, _w2 = validate_channel_selection(
+                        _ref_img, exclude_color, tiff_path=_sample_ref, role="exclude channel",
+                    )
+                    if _w2:
+                        _warnings.append(_w2)
+                except ChannelValidationError as _cve:
+                    QMessageBox.critical(self, "Cannot use selected channel", str(_cve))
+                    return
+                if _warnings:
+                    _resp = QMessageBox.warning(
+                        self, "Channel check",
+                        "\n\n".join(_warnings) + "\n\nProceed anyway?",
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+                    )
+                    if _resp != QMessageBox.Yes:
+                        return
+        # ------------------------------------------------------------------------
         # Switch into the interactive workspace for analysis steps
         self.show_workspace(True)
         # Aggregated results
@@ -1991,14 +2053,11 @@ class AnalysisTab(QWidget):
         import pandas as pd
         import re
         CURRENT_DATE = datetime.datetime.now().strftime("%Y-%m-%d")
-        # Compose a descriptive filename for the results CSV. Include the target (CD68) channel,
-        # the exclusion channel (if any) and the analysis method. This makes it clear which
-        # parameters were used to generate the results and prevents overwriting between runs.
-        suffix_parts = [cd68_color]
-        if exclude_color != "none":
-            suffix_parts.append(f"exclude_{exclude_color}")
-        suffix_parts.append(method)
-        final_csv_name = f"results_detect_{'_'.join(suffix_parts)}.csv"
+        # Compose a descriptive filename for the results CSV: the detection (CD68)
+        # channel, the exclusion channel (or "none"), and the analysis method. This
+        # makes the processing parameters clear and prevents overwriting between runs,
+        # e.g. "results_detect-red_exclude-none_contour.csv".
+        final_csv_name = f"results_detect-{cd68_color}_exclude-{exclude_color}_{method}.csv"
         final_csv_path = os.path.join(self.base_path, final_csv_name)
         # Prepare aggregated DataFrame with updated columns (do not include hemisphere diff columns)
         if os.path.exists(final_csv_path):
@@ -2042,14 +2101,24 @@ class AnalysisTab(QWidget):
             if col not in aggregated_df.columns:
                 aggregated_df[col] = ""
         exit_requested = False
-        # Load preprocessing metadata if available for pixel-to-micron conversion
-        # Locate the preprocessing metadata CSV. Search for files starting with 'preprocessed_detect_'
+        # Load preprocessing metadata if available for pixel-to-micron conversion.
+        # Match any preprocess metadata CSV: the current name is
+        # "preprocessed_ref-<ref>_detect-<det>.csv", and older runs used
+        # "preprocessed_detect_<...>.csv" -- both start with "preprocessed" and
+        # contain "detect". Pick the most recently written if several coexist.
         metadata_path = None
         try:
-            for fname in os.listdir(self.base_path):
-                if fname.startswith("preprocessed_detect_") and fname.endswith(".csv"):
-                    metadata_path = os.path.join(self.base_path, fname)
-                    break
+            _candidates = [
+                f for f in os.listdir(self.base_path)
+                if f.lower().startswith("preprocessed")
+                and "detect" in f.lower()
+                and f.lower().endswith(".csv")
+            ]
+            if _candidates:
+                metadata_path = os.path.join(
+                    self.base_path,
+                    max(_candidates, key=lambda f: os.path.getmtime(os.path.join(self.base_path, f))),
+                )
         except Exception:
             metadata_path = None
         # Fallback to legacy filename for backwards compatibility

@@ -100,7 +100,7 @@ def test_run_analysis_writes_expected_filename_for_exclude_channel(qapp, monkeyp
     tab.exclude_combo.setCurrentText("green")
     tab.run_analysis()
 
-    out_csv = tmp_path / "results_detect_red_exclude_green_contour.csv"
+    out_csv = tmp_path / "results_detect-red_exclude-green_contour.csv"
     assert out_csv.exists()
     df = pd.read_csv(out_csv)
     assert len(df) == 1
@@ -121,7 +121,7 @@ def test_run_analysis_output_csv_column_contract(qapp, monkeypatch, tmp_path):
     tab.exclude_combo.setCurrentText("none")
     tab.run_analysis()
 
-    out_csv = tmp_path / "results_detect_red_contour.csv"
+    out_csv = tmp_path / "results_detect-red_exclude-none_contour.csv"
     assert out_csv.exists()
     df = pd.read_csv(out_csv)
     expected_prefix = [

@@ -123,6 +123,46 @@ def test_process_folder_outputs_metadata(tmp_path):
     assert (output_dir / "A1").exists()
 
 
+def test_process_folder_reads_lzw_compressed_tiffs(tmp_path):
+    """Regression: real slide exports are LZW-compressed, which tifffile can only
+    decode when the `imagecodecs` package is installed. Every other preprocess
+    test writes *uncompressed* TIFFs and so never exercises this path -- which is
+    why a missing `imagecodecs` slipped through until real data was used. This
+    guards against the dependency silently going missing from the environment."""
+    input_dir = tmp_path / "input_lzw"
+    output_dir = tmp_path / "output_lzw"
+    input_dir.mkdir()
+    ref = np.zeros((80, 80, 3), dtype=np.uint8)
+    cv2.rectangle(ref, (10, 10), (70, 70), (255, 255, 255), -1)
+    inf = ref.copy()
+    # compression="lzw" is the only meaningful difference from the test above.
+    tiff.imwrite(str(input_dir / "A1_overlay.tif"), ref, compression="lzw")
+    tiff.imwrite(str(input_dir / "A1_CD68.tif"), inf, compression="lzw")
+
+    hsv_bounds = {
+        "lower_H": 0,
+        "lower_S": 0,
+        "lower_V": 10,
+        "upper_H": 255,
+        "upper_S": 255,
+        "upper_V": 255,
+    }
+    count, _, rows = preprocess_mod.process_folder(
+        str(input_dir),
+        str(output_dir),
+        hsv_bounds,
+        min_area=200,
+        padding=2,
+        contour_keyword="overlay",
+        infarct_keyword="CD68",
+        thresh=10,
+        pixel_scale=None,
+    )
+    assert count >= 1
+    assert rows
+    assert (output_dir / "A1").exists()
+
+
 def test_process_folder_keeps_reference_infarct_pairs_consistent_for_multi_file_key(tmp_path):
     input_dir = tmp_path / "input_multi"
     output_dir = tmp_path / "output_multi"

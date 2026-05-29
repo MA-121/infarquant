@@ -116,11 +116,11 @@ Preprocessing outputs:
 
 - `preprocessed_sections/<animal_id>/<animal_id>_reference_<n>.tif`
 - `preprocessed_sections/<animal_id>/<animal_id>_infarct_<n>.tif`
-- `preprocessed_detect_<color>.csv`
+- `preprocessed_ref-<reference_keyword>_detect-<infarct_keyword>.csv`
 
 Analysis outputs:
 
-- `results_detect_<...>.csv`
+- `results_detect-<cd68_color>_exclude-<exclude_color>_<method>.csv`
 - segmented output images saved under per-animal `results/` folders
 
 ## Sample Data

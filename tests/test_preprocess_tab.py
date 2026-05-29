@@ -41,8 +41,11 @@ def test_run_preprocess_invalid_scale_does_not_call_process_folder(qapp, monkeyp
 
 def test_run_preprocess_writes_metadata_and_syncs_analysis_tab(qapp, monkeypatch, tmp_path):
     analysis_tab = app.AnalysisTab()
-    analysis_tab.cd68_combo.setCurrentText("blue")
     preprocess_tab = app.PreprocessTab(analysis_tab=analysis_tab)
+    # Metadata filename now encodes the actual preprocess keyword inputs, not an
+    # unrelated analysis-tab color. Set explicit keywords to verify the naming.
+    preprocess_tab.contour_kw_edit.setText("overlay")
+    preprocess_tab.infarct_kw_edit.setText("CD68")
 
     slides = tmp_path / "slides"
     slides.mkdir()
@@ -80,7 +83,7 @@ def test_run_preprocess_writes_metadata_and_syncs_analysis_tab(qapp, monkeypatch
     preprocess_tab.run_preprocess()
 
     out_folder = slides / "preprocessed_sections"
-    metadata_path = out_folder / "preprocessed_detect_blue.csv"
+    metadata_path = out_folder / "preprocessed_ref-overlay_detect-CD68.csv"
     assert metadata_path.exists()
     df = pd.read_csv(metadata_path)
     assert len(df) == 1

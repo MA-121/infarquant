@@ -547,7 +547,7 @@ def test_pixel_to_um_scale_from_metadata(qapp, monkeypatch, tmp_path):
     tab.exclude_combo.setCurrentText("none")
     tab.run_analysis()
 
-    results_path = base / "results_detect_red_contour.csv"
+    results_path = base / "results_detect-red_exclude-none_contour.csv"
     assert results_path.exists()
     df = pd.read_csv(results_path)
     df["section_id"] = df["section_id"].astype(str)
