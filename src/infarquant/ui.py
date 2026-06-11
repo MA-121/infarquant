@@ -248,6 +248,32 @@ def create_card(title: str) -> Tuple[QFrame, QVBoxLayout]:
     return card, content_layout
 
 
+def save_csv_with_retry(parent, df, path) -> bool:
+    """Save a DataFrame to CSV, prompting the user to close the file if it is
+    locked (e.g. open in Excel) and retrying until it succeeds. Returns True
+    once saved, or False if the user chooses to cancel.
+
+    On Windows an open Excel file locks the CSV, so ``to_csv`` raises and -- in
+    the windowed build with no console -- the failure would otherwise be silent.
+    Shared by the Analyze and Quantify tabs so both behave identically.
+    """
+    while True:
+        try:
+            df.to_csv(path, index=False, na_rep="NA")
+            return True
+        except OSError as exc:
+            choice = QMessageBox.warning(
+                parent,
+                "Cannot save results",
+                "Please close your current results Excel file to save the new "
+                f"results, then press Retry.\n\nFile:\n{path}\n\n({exc})",
+                QMessageBox.Retry | QMessageBox.Cancel,
+                QMessageBox.Retry,
+            )
+            if choice != QMessageBox.Retry:
+                return False
+
+
 def create_dot_cursor(size: int = 16) -> QCursor:
     """Create a small white-dot cursor for precise click actions."""
     pix = QPixmap(size, size)
@@ -1594,6 +1620,9 @@ class AnalysisTab(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # Set by MainWindow so a finished analysis can pre-fill the Quantify tab.
+        self.quantify_tab = None
+        self.last_results_csv_path = ""
         params_layout = QVBoxLayout()
         params_layout.setSizeConstraint(QLayout.SetMinimumSize)
         params_layout.setContentsMargins(0, 0, 0, 0)
@@ -2299,6 +2328,11 @@ class AnalysisTab(QWidget):
             # written as "NA" rather than left blank.
             aggregated_df = aggregated_df.where(aggregated_df != "", np.nan)
             if self._save_results_with_retry(aggregated_df, final_csv_path):
+                # Remember the results CSV and pre-fill the Quantify tab so the
+                # user can compute % infarct without re-selecting the file.
+                self.last_results_csv_path = final_csv_path
+                if getattr(self, "quantify_tab", None) is not None:
+                    self.quantify_tab.autoload_results_csv(final_csv_path)
                 QMessageBox.information(
                     self,
                     "Analysis complete",
@@ -2317,28 +2351,12 @@ class AnalysisTab(QWidget):
         self.show_workspace(False)
 
     def _save_results_with_retry(self, df, path) -> bool:
-        """Save the results CSV, prompting the user to close the file if it is
-        locked (e.g. open in Excel) and retrying until it succeeds. Returns True
-        once saved, or False if the user chooses to cancel.
+        """Delegate to the module-level :func:`save_csv_with_retry`.
 
-        On Windows an open Excel file locks the CSV, so ``to_csv`` raises and -- in
-        the windowed build with no console -- the failure would otherwise be silent.
+        Kept as a thin method for the existing call sites and tests; the retry
+        logic is shared with the Quantify tab.
         """
-        while True:
-            try:
-                df.to_csv(path, index=False, na_rep="NA")
-                return True
-            except OSError as exc:
-                choice = QMessageBox.warning(
-                    self,
-                    "Cannot save results",
-                    "Please close your current results Excel file to save the new "
-                    f"results, then press Retry.\n\nFile:\n{path}\n\n({exc})",
-                    QMessageBox.Retry | QMessageBox.Cancel,
-                    QMessageBox.Retry,
-                )
-                if choice != QMessageBox.Retry:
-                    return False
+        return save_csv_with_retry(self, df, path)
 
     def pre_draw_roi_action(self) -> None:
         """Launch the interactive pre-ROI drawing workflow.
@@ -2369,27 +2387,251 @@ class AnalysisTab(QWidget):
         self.show_workspace(False)
 
 
+class QuantifyTab(QWidget):
+    """Tab for computing the edema-corrected infarct percentage from a results CSV.
+
+    Consumes the per-section results CSV produced by the Analyze tab (loaded
+    manually or auto-filled after an analysis run) and writes a new CSV that
+    relabels the hemisphere areas as ipsi_/contra_ and adds the indirect /
+    edema-corrected infarct percentage (Swanson's method):
+
+        % infarct = [Contra - (Ipsi - Infarct)] / Contra * 100
+    """
+
+    # Columns the results CSV must contain to be quantifiable.
+    REQUIRED_COLUMNS = [
+        "animal_id",
+        "section_id",
+        "whole_area_px",
+        "left_area_px",
+        "right_area_px",
+        "infarct_area_px",
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.results_csv_path = ""
+
+        params_layout = QVBoxLayout()
+        params_layout.setSizeConstraint(QLayout.SetMinimumSize)
+        params_layout.setContentsMargins(0, 0, 0, 0)
+        params_layout.setSpacing(6)
+        params_page = QWidget()
+
+        # 1) Equation header -------------------------------------------------
+        eq_card, eq_layout = create_card("1) Infarct equation")
+        equation = QLabel()
+        equation.setTextFormat(Qt.RichText)
+        equation.setWordWrap(True)
+        equation.setText(
+            "<div style='font-size:12pt;'>"
+            "<b>% infarct</b>&nbsp;=&nbsp; "
+            "[ Contra hemi area − ( Ipsi hemi area − Infarct area ) ]"
+            "&nbsp;÷&nbsp; Contra hemi area&nbsp;×&nbsp; 100"
+            "</div>"
+        )
+        eq_layout.addWidget(equation)
+        note = QLabel(
+            "The contralesional hemisphere is the healthy reference; this corrects "
+            "the infarct measurement for swelling (edema) of the ipsilesional side."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#6B7280;")
+        eq_layout.addWidget(note)
+        params_layout.addWidget(eq_card)
+
+        # 2) Results CSV -----------------------------------------------------
+        csv_card, csv_layout = create_card("2) Results CSV")
+        csv_desc = QLabel(
+            "Use the results from the Analyze step. This is filled in automatically "
+            "after an analysis run, or load a results CSV manually."
+        )
+        csv_desc.setWordWrap(True)
+        csv_layout.addWidget(csv_desc)
+        self.csv_btn = QPushButton("Select Results CSV...")
+        self.csv_btn.setObjectName("secondaryAction")
+        self.csv_btn.clicked.connect(self.select_results_csv)
+        csv_layout.addWidget(self.csv_btn)
+        self.csv_field = QLineEdit()
+        self.csv_field.setReadOnly(True)
+        self.csv_field.setPlaceholderText("Auto-filled from the last analysis, or load one")
+        csv_layout.addWidget(self.csv_field)
+        params_layout.addWidget(csv_card)
+
+        # 3) Ipsilesional side ----------------------------------------------
+        side_card, side_layout = create_card("3) Ipsilesional side")
+        side_row = QHBoxLayout()
+        side_row.setContentsMargins(0, 0, 0, 0)
+        side_row.setSpacing(6)
+        side_help = QToolButton()
+        side_help.setText("?")
+        side_help.setStyleSheet(
+            "background-color:#5FA2E5; color:white; border-radius:8px; min-width:16px; min-height:16px;"
+        )
+        side_help.setToolTip(
+            "Which hemisphere is the lesioned (ipsilesional) side.\n"
+            "The opposite hemisphere is used as the healthy contralesional reference.\n"
+            "Its area columns are relabeled ipsi_ / contra_ in the output."
+        )
+        side_help.clicked.connect(
+            lambda: QMessageBox.information(self, "Ipsilesional side", side_help.toolTip())
+        )
+        self.side_label = QLabel("Ipsilesional side:")
+        self.ipsi_combo = QComboBox()
+        self.ipsi_combo.addItems(["Left", "Right"])
+        self.ipsi_combo.setCurrentText("Left")
+        side_row.addWidget(side_help)
+        side_row.addWidget(self.side_label)
+        side_row.addWidget(self.ipsi_combo)
+        side_row.addStretch(1)
+        side_holder = QWidget()
+        side_holder.setLayout(side_row)
+        side_layout.addWidget(side_holder)
+        params_layout.addWidget(side_card)
+
+        # 4) Run -------------------------------------------------------------
+        run_card, run_layout = create_card("4) Run quantification")
+        self.run_btn = QPushButton("Run Quantification")
+        self.run_btn.setObjectName("primaryAction")
+        self.run_btn.clicked.connect(self.run_quantify)
+        run_layout.addWidget(self.run_btn)
+        params_layout.addWidget(run_card)
+
+        params_layout.addStretch(1)
+        params_page.setLayout(params_layout)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setWidget(params_page)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(6)
+        main_layout.addWidget(scroll, 1)
+        self.setMinimumHeight(320)
+
+    def autoload_results_csv(self, path: str) -> None:
+        """Pre-fill the results CSV path (called after a successful analysis)."""
+        self.results_csv_path = path or ""
+        self.csv_field.setText(self.results_csv_path)
+
+    def select_results_csv(self) -> None:
+        """Let the user pick a results CSV manually."""
+        start_dir = os.path.dirname(self.results_csv_path) if self.results_csv_path else ""
+        fname, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Results CSV",
+            start_dir,
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if fname:
+            self.results_csv_path = fname
+            self.csv_field.setText(fname)
+
+    def run_quantify(self) -> None:
+        """Compute the edema-corrected infarct percentage and write a new CSV."""
+        import datetime
+        import pandas as pd
+
+        if not self.results_csv_path:
+            QMessageBox.warning(self, "No CSV", "Please load a results CSV first.")
+            return
+        try:
+            df = pd.read_csv(self.results_csv_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Cannot read CSV", f"Failed to read the results CSV:\n{exc}")
+            return
+
+        missing = [c for c in self.REQUIRED_COLUMNS if c not in df.columns]
+        if missing:
+            QMessageBox.warning(
+                self,
+                "Unexpected CSV",
+                "The selected file does not look like an InfarQuant results CSV.\n"
+                "Missing column(s): " + ", ".join(missing),
+            )
+            return
+
+        side = self.ipsi_combo.currentText().strip()
+        # Coerce area columns to numeric so stray text / "NA" become NaN.
+        for col in ("whole_area_px", "left_area_px", "right_area_px", "infarct_area_px"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        if side.lower() == "left":
+            ipsi = df["left_area_px"]
+            contra = df["right_area_px"]
+        else:
+            ipsi = df["right_area_px"]
+            contra = df["left_area_px"]
+        infarct = df["infarct_area_px"]
+
+        # Edema-corrected (indirect) infarct percentage. Guard divide-by-zero /
+        # missing contralesional area -> NaN (written as "NA").
+        pct = (contra - (ipsi - infarct)) / contra * 100.0
+        pct = pct.where((contra != 0) & contra.notna(), np.nan)
+
+        CURRENT_DATE = datetime.datetime.now().strftime("%Y-%m-%d")
+        out = pd.DataFrame()
+        out["animal_id"] = df["animal_id"]
+        out["section_id"] = df["section_id"]
+        if "filename" in df.columns:
+            out["filename"] = df["filename"]
+        out["ipsilesional_side"] = side
+        out["whole_area_px"] = df["whole_area_px"]
+        out["ipsi_area_px"] = ipsi
+        out["contra_area_px"] = contra
+        out["infarct_area_px"] = infarct
+        out["contra_adjusted_infarct_pct"] = pct
+        out["date_quantified"] = CURRENT_DATE
+
+        # Any blank value is written as "NA", matching the analysis CSV.
+        out = out.where(out != "", np.nan)
+        out_dir = os.path.dirname(self.results_csv_path)
+        out_name = "quantify_" + os.path.basename(self.results_csv_path)
+        out_path = os.path.join(out_dir, out_name)
+        if save_csv_with_retry(self, out, out_path):
+            QMessageBox.information(
+                self,
+                "Quantification complete",
+                f"Infarct quantification finished.\nView results at: {out_path}",
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                "Results not saved",
+                "Results were not saved because the file stayed open/locked.\n"
+                f"No changes were written to:\n{out_path}",
+            )
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("InfarQuant")
         self.setMinimumSize(980, 600)
-        # Create analysis and preprocessing pages and use a QStackedWidget to switch between them.
+        # Create the preprocessing, analysis and quantification pages and use a
+        # QStackedWidget to switch between them.
         self.analysis_tab = AnalysisTab()
         self.preprocess_tab = PreprocessTab(self.analysis_tab)
+        self.quantify_tab = QuantifyTab()
+        # Let the analysis step pre-fill the Quantify tab with its results CSV.
+        self.analysis_tab.quantify_tab = self.quantify_tab
         self.stack = QStackedWidget()
         self.stack.addWidget(self.preprocess_tab)
         self.stack.addWidget(self.analysis_tab)
+        self.stack.addWidget(self.quantify_tab)
         # Create navigation buttons that behave like tabs
         self.btn_preprocess = QPushButton("Preprocess")
         self.btn_analyze = QPushButton("Analyze")
-        for btn in (self.btn_preprocess, self.btn_analyze):
+        self.btn_quantify = QPushButton("Quantify")
+        for btn in (self.btn_preprocess, self.btn_analyze, self.btn_quantify):
             btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             btn.setMinimumHeight(36)
             btn.setCheckable(True)
             btn.setProperty("nav", True)
         self.btn_preprocess.clicked.connect(lambda: self.switch_page(0))
         self.btn_analyze.clicked.connect(lambda: self.switch_page(1))
+        self.btn_quantify.clicked.connect(lambda: self.switch_page(2))
         # Build header with title and navigation
         header = QFrame()
         header.setProperty("card", True)
@@ -2410,6 +2652,7 @@ class MainWindow(QMainWindow):
             title.setStyleSheet("font-size: 18pt; font-weight: 700;")
         header_layout.addWidget(self.btn_preprocess)
         header_layout.addWidget(self.btn_analyze)
+        header_layout.addWidget(self.btn_quantify)
         header_layout.addStretch(1)
         header_layout.addWidget(title, 0, Qt.AlignRight | Qt.AlignVCenter)
         # Central layout
@@ -2431,19 +2674,20 @@ class MainWindow(QMainWindow):
         """
         Switch to the given page index and update button styles.
 
-        This method is used by the navigation buttons to display either the
-        preprocessing page (index 0) or the analysis page (index 1).  The
-        selected button is highlighted, while the other uses the unselected
-        style.
+        This method is used by the navigation buttons to display the
+        preprocessing page (index 0), the analysis page (index 1) or the
+        quantification page (index 2).  The selected button is highlighted,
+        while the others use the unselected style.
         """
         self.stack.setCurrentIndex(index)
         # Update checked state
         self.btn_preprocess.setChecked(index == 0)
         self.btn_analyze.setChecked(index == 1)
-        # Update status bar and shortcuts panel context
+        self.btn_quantify.setChecked(index == 2)
+        # Update status bar context
         if index == 0:
             self.statusBar().showMessage("Preprocess: split whole-slide images into sections.")
-            pass
-        else:
+        elif index == 1:
             self.statusBar().showMessage("Analyze: interactively segment and quantify infarcts.")
-            pass
+        else:
+            self.statusBar().showMessage("Quantify: compute edema-corrected % infarct from results.")
