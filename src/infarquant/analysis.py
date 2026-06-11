@@ -38,6 +38,22 @@ def update_instruction_table(title: str, pairs: list) -> None:
 COLOR_TO_BGR_INDEX = {"blue": 0, "green": 1, "red": 2}
 
 
+def channel_plane(image: np.ndarray, color: str) -> np.ndarray:
+    """Return a 2D intensity plane for a colour selection.
+
+    ``'grayscale'`` combines all channels (luminance); ``'red'``/``'green'``/``'blue'``
+    pick the corresponding BGR plane. For a genuinely grayscale image (already 2D,
+    or 3-channel with R==G==B) ``'grayscale'`` equals any single channel. Centralising
+    extraction here keeps the thresholding / area logic identical regardless of the
+    selected channel mode, so grayscale detection works without special-casing.
+    """
+    if getattr(image, "ndim", 0) == 2:
+        return image
+    if (color or "").strip().lower() == "grayscale":
+        return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return image[:, :, COLOR_TO_BGR_INDEX.get(color, 1)]
+
+
 class ChannelValidationError(Exception):
     """Raised when an image cannot support the requested colour channel."""
 
@@ -87,10 +103,18 @@ def validate_channel_selection(image, color, *, tiff_path=None, role="channel"):
     color = (color or "").strip().lower()
     if color == "none":
         return None, None
+    if color == "grayscale":
+        if image is None or getattr(image, "ndim", 0) < 2:
+            shape = None if image is None else getattr(image, "shape", None)
+            raise ChannelValidationError(
+                f"The {role} image could not be read as an image (shape={shape}), so "
+                f"'grayscale' detection cannot be used. Pick a different file."
+            )
+        return None, None
     if color not in COLOR_TO_BGR_INDEX:
         raise ChannelValidationError(
             f"Unknown {role} colour '{color}'. Expected one of "
-            f"{', '.join(COLOR_TO_BGR_INDEX)}."
+            f"{', '.join(COLOR_TO_BGR_INDEX)}, grayscale."
         )
     if image is None or getattr(image, "ndim", 0) != 3 or image.shape[2] != 3:
         shape = None if image is None else getattr(image, "shape", None)
@@ -156,10 +180,10 @@ def calculate_areas(left_mask: np.ndarray,
             infarct_area = 0.0
 
     return {
-        "whole_area": whole_area,
-        "left_area": left_area,
-        "right_area": right_area,
-        "infarct_area": infarct_area,
+        "whole_area_px": whole_area,
+        "left_area_px": left_area,
+        "right_area_px": right_area,
+        "infarct_area_px": infarct_area,
     }
 
 # -----------------------------------------------------------------------------
@@ -807,9 +831,6 @@ def patched_adjust_infarct_threshold(
         provided, the ROI shape is preloaded and cannot be edited; left-click will
         reposition the ROI across images.
     """
-    # Map colours to channel indices (shared constant; see COLOR_TO_BGR_INDEX)
-    cd68_idx = COLOR_TO_BGR_INDEX.get(cd68_color, 1)
-    exclude_idx = COLOR_TO_BGR_INDEX.get(exclude_color, 2)
     # Prepare trackbars; include exclude threshold only if an exclusion channel is specified
     trackbar_window = "Infarct Thresholds"
     user_defaults: dict = {"CD68 threshold": cd68_start_val}
@@ -1009,14 +1030,14 @@ def patched_adjust_infarct_threshold(
         }
         # Create masks for current thresholds
         # Threshold the CD68 channel on the infarct image. This channel corresponds to the infarct marker
-        cd68_channel = infarct_img[:, :, cd68_idx]
+        cd68_channel = channel_plane(infarct_img, cd68_color)
         _, mask_cd68 = cv2.threshold(cd68_channel, positions['Infarct Lower V'], 255, cv2.THRESH_BINARY)
         # For the exclusion channel, use the reference image rather than the infarct image.  In many
         # datasets the channel to exclude (e.g. GFAP, DAPI) is present in the reference image and not
         # in the infarct marker image.  Using the reference image here ensures the exclusion slider
         # operates on the correct channel.  If the user selected 'none', produce a full mask of ones.
         if exclude_color != "none":
-            exclude_channel = reference_img[:, :, exclude_idx]
+            exclude_channel = channel_plane(reference_img, exclude_color)
             _, mask_exclude = cv2.threshold(
                 exclude_channel,
                 positions['exclude threshold'],
@@ -1310,8 +1331,7 @@ def patched_process_images(
         infarct_mask = np.zeros(infarct_img.shape[:2], dtype=np.uint8)
         infarct_contours: list = []
     else:
-        cd68_idx = COLOR_TO_BGR_INDEX.get(cd68_color, 1)
-        cd68_channel = infarct_img[:, :, cd68_idx]
+        cd68_channel = channel_plane(infarct_img, cd68_color)
         # Threshold the CD68 (infarct) channel
         _, mask_cd68 = cv2.threshold(cd68_channel, final_infarct_positions['Infarct Lower V'], 255, cv2.THRESH_BINARY)
         # For exclusion, use the flipped reference image rather than the infarct image.  This mirrors the
@@ -1320,9 +1340,8 @@ def patched_process_images(
         if exclude_color == "none":
             mask_exclude = np.ones_like(mask_cd68, dtype=np.uint8) * 255
         else:
-            exclude_idx = COLOR_TO_BGR_INDEX[exclude_color] if exclude_color != "none" else None
             # Use mod_ref_img (flipped reference image) for the exclusion channel
-            exclude_channel = mod_ref_img[:, :, exclude_idx]
+            exclude_channel = channel_plane(mod_ref_img, exclude_color)
             _, mask_exclude = cv2.threshold(
                 exclude_channel,
                 final_infarct_positions['exclude threshold'],
@@ -1361,16 +1380,16 @@ def patched_process_images(
         # fraction of ROI pixels above threshold (and not excluded by the exclude channel).
         roi_bool = (roi_mask > 0)
         # Override the infarct area in the areas dict with the ROI area
-        areas["infarct_area"] = float(np.sum(roi_bool))
+        areas["infarct_area_px"] = float(np.sum(roi_bool))
         # Compute positive mask: threshold-positive pixels within the ROI
         positive_mask_bool = np.logical_and((infarct_mask > 0), roi_bool)
         infarct_area_positive = float(np.sum(positive_mask_bool))
         # Intensity averages: all ROI pixels
-        all_vals = infarct_img[:, :, COLOR_TO_BGR_INDEX.get(cd68_color, 1)][roi_bool]
+        all_vals = channel_plane(infarct_img, cd68_color)[roi_bool]
         if all_vals.size > 0:
             infarct_intensity_avg = float(np.mean(all_vals))
         # Intensity average of threshold-positive pixels within ROI
-        pos_vals = infarct_img[:, :, COLOR_TO_BGR_INDEX.get(cd68_color, 1)][positive_mask_bool]
+        pos_vals = channel_plane(infarct_img, cd68_color)[positive_mask_bool]
         if pos_vals.size > 0:
             infarct_area_positive_intensity_avg = float(np.mean(pos_vals))
     else:
@@ -1384,11 +1403,11 @@ def patched_process_images(
             positive_mask = cv2.bitwise_and(infarct_mask, contour_mask)
             infarct_area_positive = float(np.sum(positive_mask > 0))
             # Mean intensity of all pixels inside the contour (irrespective of threshold)
-            vals_all = infarct_img[:, :, COLOR_TO_BGR_INDEX.get(cd68_color, 1)][contour_mask > 0]
+            vals_all = channel_plane(infarct_img, cd68_color)[contour_mask > 0]
             if vals_all.size > 0:
                 infarct_intensity_avg = float(np.mean(vals_all))
             # Mean intensity of threshold-positive pixels inside the contour
-            vals_pos = infarct_img[:, :, COLOR_TO_BGR_INDEX.get(cd68_color, 1)][positive_mask > 0]
+            vals_pos = channel_plane(infarct_img, cd68_color)[positive_mask > 0]
             if vals_pos.size > 0:
                 infarct_area_positive_intensity_avg = float(np.mean(vals_pos))
 
@@ -1411,8 +1430,6 @@ def patched_process_images(
     # accounts for section-to-section variability in exposure.  If the brain
     # mask or channel values are unavailable, leave blank.
     try:
-        # Determine channel index for cd68_color; fallback to green (1)
-        cd68_idx_norm = COLOR_TO_BGR_INDEX.get(cd68_color, 1)
         normalization_value = ""
         normalized_intensity = ""
         # Use the brain_thresh_mask defined earlier to extract brain pixels
@@ -1420,7 +1437,7 @@ def patched_process_images(
         mask_arr = brain_thresh_mask
         if mask_arr is not None and infarct_img is not None:
             # Extract intensity values from the infarct image within the brain mask
-            channel_vals = infarct_img[:, :, cd68_idx_norm][mask_arr > 0]
+            channel_vals = channel_plane(infarct_img, cd68_color)[mask_arr > 0]
             if channel_vals.size > 0:
                 # Sort values and take the lowest-intensity fraction defined by background_percent
                 sorted_vals = np.sort(channel_vals.flatten())
@@ -1607,14 +1624,12 @@ def qt_process_images(
         infarct_mask = np.zeros(infarct_img.shape[:2], dtype=np.uint8)
         infarct_contours: list = []
     else:
-        cd68_idx = COLOR_TO_BGR_INDEX.get(cd68_color, 1)
-        cd68_channel = infarct_img[:, :, cd68_idx]
+        cd68_channel = channel_plane(infarct_img, cd68_color)
         _, mask_cd68 = cv2.threshold(cd68_channel, final_infarct_positions["Infarct Lower V"], 255, cv2.THRESH_BINARY)
         if exclude_color == "none":
             mask_exclude = np.ones_like(mask_cd68, dtype=np.uint8) * 255
         else:
-            exclude_idx = COLOR_TO_BGR_INDEX[exclude_color] if exclude_color != "none" else None
-            exclude_channel = mod_ref_img[:, :, exclude_idx]
+            exclude_channel = channel_plane(mod_ref_img, exclude_color)
             _, mask_exclude = cv2.threshold(
                 exclude_channel,
                 final_infarct_positions["exclude threshold"],
@@ -1644,18 +1659,18 @@ def qt_process_images(
     roi_mask = seg_result.get("roi_mask", None)
     if fixed_roi_used and roi_mask is not None:
         roi_bool = (roi_mask > 0)
-        areas["infarct_area"] = float(np.sum(roi_bool))
+        areas["infarct_area_px"] = float(np.sum(roi_bool))
         positive_mask_bool = np.logical_and((infarct_mask > 0), roi_bool)
         infarct_area_positive = float(np.sum(positive_mask_bool))
-        all_vals = infarct_img[:, :, COLOR_TO_BGR_INDEX.get(cd68_color, 1)][roi_bool]
+        all_vals = channel_plane(infarct_img, cd68_color)[roi_bool]
         infarct_intensity_avg = float(np.mean(all_vals)) if all_vals.size else 0.0
         if np.any(positive_mask_bool):
-            infarct_area_positive_intensity_avg = float(np.mean(infarct_img[:, :, COLOR_TO_BGR_INDEX.get(cd68_color, 1)][positive_mask_bool]))
+            infarct_area_positive_intensity_avg = float(np.mean(channel_plane(infarct_img, cd68_color)[positive_mask_bool]))
         else:
             infarct_area_positive_intensity_avg = 0.0
     else:
         infarct_area_positive = float(np.sum(infarct_mask > 0))
-        infarct_intensity_avg = float(np.mean(infarct_img[:, :, COLOR_TO_BGR_INDEX.get(cd68_color, 1)][infarct_mask > 0])) if np.any(infarct_mask > 0) else 0.0
+        infarct_intensity_avg = float(np.mean(channel_plane(infarct_img, cd68_color)[infarct_mask > 0])) if np.any(infarct_mask > 0) else 0.0
         infarct_area_positive_intensity_avg = infarct_intensity_avg
 
     # Background intensity and normalized metrics
@@ -1666,7 +1681,7 @@ def qt_process_images(
         # Determine background region: lowest percentile within brain mask
         brain_mask = brain_thresh_mask > 0
         if np.any(brain_mask):
-            vals = mod_ref_img[:, :, COLOR_TO_BGR_INDEX.get(cd68_color, 1)][brain_mask]
+            vals = channel_plane(mod_ref_img, cd68_color)[brain_mask]
             cutoff = np.percentile(vals, background_percent)
             bg_vals = vals[vals <= cutoff]
             background_intensity = float(np.mean(bg_vals)) if bg_vals.size else 0.0

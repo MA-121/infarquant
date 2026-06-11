@@ -521,10 +521,10 @@ def test_pixel_to_um_scale_from_metadata(qapp, monkeypatch, tmp_path):
 
     def fake_qt_process_images(*args, **kwargs):
         return {
-            "whole_area": 100,
-            "left_area": 50,
-            "right_area": 50,
-            "infarct_area": 10,
+            "whole_area_px": 100,
+            "left_area_px": 50,
+            "right_area_px": 50,
+            "infarct_area_px": 10,
             "infarct_area_positive": 10,
             "infarct_area_intensity_avg": 1.0,
             "infarct_area_positive_intensity_avg": 1.0,
@@ -555,3 +555,21 @@ def test_pixel_to_um_scale_from_metadata(qapp, monkeypatch, tmp_path):
     row2 = df[df["section_id"] == "2"].iloc[0]
     assert float(row1["pixel_to_um_scale"]) == pytest.approx(1.0)
     assert float(row2["pixel_to_um_scale"]) == pytest.approx(3.0)
+    # Areas convert to real units by dividing by the scale squared (linear px/um).
+    # Section 1: scale 2.0 * downsample 0.5 = 1.0 -> /1.0; Section 2: scale 3.0 -> /9.0.
+    assert float(row1["whole_area_um^2"]) == pytest.approx(100 / 1.0)
+    assert float(row1["infarct_area_um^2"]) == pytest.approx(10 / 1.0)
+    assert float(row2["whole_area_um^2"]) == pytest.approx(100 / 9.0)
+    assert float(row2["left_area_um^2"]) == pytest.approx(50 / 9.0)
+    assert float(row2["right_area_um^2"]) == pytest.approx(50 / 9.0)
+    assert float(row2["infarct_area_um^2"]) == pytest.approx(10 / 9.0)
+    # The positive-pixel / intensity columns are pruned from the output.
+    for col in (
+        "infarct_area_positive",
+        "infarct_area_intensity_avg",
+        "infarct_area_positive_intensity_avg",
+        "background_intensity",
+        "infarct_intensity_avg_normalized",
+        "infarct_intensity_positive_avg_normalized",
+    ):
+        assert col not in df.columns

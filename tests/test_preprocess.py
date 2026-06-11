@@ -61,12 +61,12 @@ def test_calculate_areas_mask_and_contour():
     brain = {"left": contour, "right": contour, "whole": contour}
 
     mask_areas = analysis_mod.calculate_areas(left, right, infarct, contour, [], "mask", "max", brain)
-    assert mask_areas["whole_area"] == 50 * 100
-    assert mask_areas["infarct_area"] == 50 * 25
+    assert mask_areas["whole_area_px"] == 50 * 100
+    assert mask_areas["infarct_area_px"] == 50 * 25
 
     contour_areas = analysis_mod.calculate_areas(left, right, infarct, contour, [contour], "contour", "max", brain)
-    assert contour_areas["whole_area"] > 0
-    assert contour_areas["infarct_area"] > 0
+    assert contour_areas["whole_area_px"] > 0
+    assert contour_areas["infarct_area_px"] > 0
 
 
 def test_process_folder_outputs_metadata(tmp_path):

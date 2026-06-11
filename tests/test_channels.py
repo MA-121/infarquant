@@ -12,6 +12,7 @@ import tifffile as tiff
 from infarquant.analysis import (
     COLOR_TO_BGR_INDEX,
     ChannelValidationError,
+    channel_plane,
     validate_channel_selection,
 )
 
@@ -60,6 +61,49 @@ def test_none_bypasses_validation():
 def test_unknown_colour_is_hard_error():
     with pytest.raises(ChannelValidationError):
         validate_channel_selection(_bgr(r=200), "magenta")
+
+
+def test_channel_plane_rgb_selects_single_plane():
+    img = _bgr(b=10, g=20, r=30)
+    assert np.all(channel_plane(img, "red") == 30)
+    assert np.all(channel_plane(img, "green") == 20)
+    assert np.all(channel_plane(img, "blue") == 10)
+
+
+def test_channel_plane_gray_on_true_grayscale_equals_any_channel():
+    # A genuine grayscale image loaded as BGR has R==G==B; 'gray' equals that value
+    # and matches picking any single channel.
+    img = _bgr(b=128, g=128, r=128)
+    plane = channel_plane(img, "grayscale")
+    assert plane.ndim == 2
+    assert np.all(plane == 128)
+    assert np.array_equal(plane, channel_plane(img, "red"))
+
+
+def test_channel_plane_gray_on_colour_is_luminance():
+    img = _bgr(b=10, g=20, r=30)
+    plane = channel_plane(img, "grayscale")
+    assert plane.ndim == 2
+    # Luminance combines all channels, so it lies within the per-channel range.
+    assert 10 <= int(plane[0, 0]) <= 30
+
+
+def test_channel_plane_passes_through_2d_image():
+    gray = np.full((16, 16), 77, dtype=np.uint8)
+    assert np.array_equal(channel_plane(gray, "grayscale"), gray)
+
+
+def test_gray_validation_accepts_three_channel_image():
+    img = _bgr(b=100, g=100, r=100)
+    _, warning = validate_channel_selection(img, "grayscale", role="CD68 channel")
+    assert warning is None  # 'gray' never warns about an empty single plane
+
+
+def test_gray_validation_accepts_two_channel_grayscale_image():
+    gray = np.full((16, 16), 50, dtype=np.uint8)
+    # 'gray' is valid even for a single-plane (2D) image, unlike r/g/b.
+    _, warning = validate_channel_selection(gray, "grayscale")
+    assert warning is None
 
 
 def test_lzw_compressed_roundtrip_validates(tmp_path):

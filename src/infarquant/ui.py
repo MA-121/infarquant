@@ -41,9 +41,9 @@ from PyQt5.QtWidgets import (
 )
 
 from .analysis import (
-    COLOR_TO_BGR_INDEX,
     ChannelValidationError,
     DRAW_THICKNESS,
+    channel_plane,
     draw_dashed_polyline,
     get_largest_contour,
     qt_process_images,
@@ -750,8 +750,6 @@ class AnalysisWorkspace(QWidget):
     ):
         """Interactive infarct segmentation using in-app controls."""
         self._set_status(f"Infarct: {display_info}")
-        cd68_idx = COLOR_TO_BGR_INDEX.get(cd68_color, 1)
-        exclude_idx = COLOR_TO_BGR_INDEX.get(exclude_color, 2)
         roi_fixed = fixed_roi_data is not None
         fixed_poly_norm = None
         fixed_centroid_norm = None
@@ -885,10 +883,10 @@ class AnalysisWorkspace(QWidget):
         def _update_display():
             nonlocal selected_infarct_contour, current_index, save_whole, save_left, save_right, top_contours
             positions = _positions()
-            cd68_channel = infarct_img[:, :, cd68_idx]
+            cd68_channel = channel_plane(infarct_img, cd68_color)
             _, mask_cd68 = cv2.threshold(cd68_channel, positions["Infarct Lower V"], 255, cv2.THRESH_BINARY)
             if exclude_color != "none":
-                exclude_channel = reference_img[:, :, exclude_idx]
+                exclude_channel = channel_plane(reference_img, exclude_color)
                 _, mask_exclude = cv2.threshold(exclude_channel, positions["exclude threshold"], 255, cv2.THRESH_BINARY_INV)
             else:
                 mask_exclude = np.ones_like(mask_cd68, dtype=np.uint8) * 255
@@ -1387,7 +1385,7 @@ class PreprocessTab(QWidget):
         )
         scale_help.setToolTip(
             "Pixel-to-micron scale used for converting pixel areas to um.\n"
-            "Leave blank to report results in pixels. When provided, the app will adjust the scale if the image is downsampled during preprocessing."
+            "When provided, the app will adjust the scale if the image is downsampled during preprocessing."
         )
         # Append scale widgets after threshold widgets
         params_layout.addWidget(scale_help)
@@ -1683,7 +1681,7 @@ class AnalysisTab(QWidget):
         # CD68 color selection
         self.cd68_label = QLabel("CD68 channel:")
         self.cd68_combo = QComboBox()
-        self.cd68_combo.addItems(["red", "green", "blue"])
+        self.cd68_combo.addItems(["red", "green", "blue", "grayscale"])
         self.cd68_combo.setCurrentText("red")
         cd68_help = QToolButton()
         cd68_help.setText("?")
@@ -1692,7 +1690,8 @@ class AnalysisTab(QWidget):
         )
         cd68_help.setToolTip(
             "Color channel used for the CD68 infarct marker.\n"
-            "Choose the color corresponding to the channel where CD68 staining is present."
+            "Choose the color corresponding to the channel where CD68 staining is present.\n"
+            "Use 'grayscale' for grayscale images (combines all channels into luminance)."
         )
         thresh_top_row.addWidget(cd68_help)
         thresh_top_row.addWidget(self.cd68_label)
@@ -1701,7 +1700,7 @@ class AnalysisTab(QWidget):
         self.exclude_label = QLabel("exclude channel:")
         self.exclude_combo = QComboBox()
         # Allow 'None' option so exclusion can be disabled
-        self.exclude_combo.addItems(["red", "green", "blue", "none"])
+        self.exclude_combo.addItems(["red", "green", "blue", "grayscale", "none"])
         self.exclude_combo.setCurrentText("none")
         exclude_help = QToolButton()
         exclude_help.setText("?")
@@ -2076,10 +2075,14 @@ class AnalysisTab(QWidget):
             "animal_id",
             "section_id",
             "filename",
-            "whole_area",
-            "left_area",
-            "right_area",
-            "infarct_area",
+            "whole_area_px",
+            "left_area_px",
+            "right_area_px",
+            "infarct_area_px",
+            "whole_area_um^2",
+            "left_area_um^2",
+            "right_area_um^2",
+            "infarct_area_um^2",
             "infarct_area_positive",
             "infarct_area_intensity_avg",
             # mean intensity of threshold-positive pixels
@@ -2221,6 +2224,21 @@ class AnalysisTab(QWidget):
                         except Exception:
                             pixel_to_um = ""
                     result_row["pixel_to_um_scale"] = pixel_to_um
+                    # Convert pixel areas to real units (um^2) when a scale is available.
+                    # Scale is linear (px/um), so an area divides by the scale squared.
+                    if pixel_to_um != "" and pixel_to_um is not None:
+                        try:
+                            scale_sq = float(pixel_to_um) ** 2
+                        except (TypeError, ValueError):
+                            scale_sq = 0.0
+                        if scale_sq > 0:
+                            for _base in ("whole_area", "left_area", "right_area", "infarct_area"):
+                                _val = result_row.get(f"{_base}_px", "")
+                                if _val != "" and _val is not None:
+                                    try:
+                                        result_row[f"{_base}_um^2"] = float(_val) / scale_sq
+                                    except (TypeError, ValueError):
+                                        pass
                     # Set analysis date if not already present
                     if "date_analyzed" not in result_row:
                         result_row["date_analyzed"] = CURRENT_DATE
@@ -2240,39 +2258,87 @@ class AnalysisTab(QWidget):
                 break
         if not aggregated_df.empty:
             # Reorder columns so that threshold values come after area metrics and pixel_to_um_scale before date
+            # Column order: ids, then each area as pixels (_px) and real units (_um^2),
+            # then thresholds and the scale. date_analyzed is forced to the last column.
             desired_order = [
                 "animal_id",
                 "section_id",
                 "filename",
-                "whole_area",
-                "left_area",
-                "right_area",
-                "infarct_area",
+                "whole_area_px",
+                "left_area_px",
+                "right_area_px",
+                "infarct_area_px",
+                "whole_area_um^2",
+                "left_area_um^2",
+                "right_area_um^2",
+                "infarct_area_um^2",
+                "brain_outline_threshold",
+                "CD68_threshold",
+                "exclude_threshold",
+                "pixel_to_um_scale",
+            ]
+            # Prune the positive-pixel / intensity columns from the output. Drop them
+            # outright so the extra_cols fallback below cannot re-append them.
+            pruned_cols = [
                 "infarct_area_positive",
                 "infarct_area_intensity_avg",
                 "infarct_area_positive_intensity_avg",
                 "background_intensity",
                 "infarct_intensity_avg_normalized",
                 "infarct_intensity_positive_avg_normalized",
-                "brain_outline_threshold",
-                "CD68_threshold",
-                "exclude_threshold",
-                "pixel_to_um_scale",
-                "date_analyzed",
             ]
-            # Use reindex to add any missing columns and order them; preserve extra columns at end
-            extra_cols = [col for col in aggregated_df.columns if col not in desired_order]
-            aggregated_df = aggregated_df.reindex(columns=desired_order + extra_cols)
-            aggregated_df.to_csv(final_csv_path, index=False)
-            QMessageBox.information(
-                self,
-                "Analysis complete",
-                f"Analysis finished.\nView results at: {final_csv_path}",
-            )
+            aggregated_df = aggregated_df.drop(columns=pruned_cols, errors="ignore")
+            # Keep date_analyzed as the very last column, after any extra columns.
+            extra_cols = [
+                col for col in aggregated_df.columns
+                if col not in desired_order and col != "date_analyzed"
+            ]
+            final_order = desired_order + extra_cols + ["date_analyzed"]
+            aggregated_df = aggregated_df.reindex(columns=final_order)
+            # Any unspecified value (e.g. no scale -> no um^2 area, no scale value) is
+            # written as "NA" rather than left blank.
+            aggregated_df = aggregated_df.where(aggregated_df != "", np.nan)
+            if self._save_results_with_retry(aggregated_df, final_csv_path):
+                QMessageBox.information(
+                    self,
+                    "Analysis complete",
+                    f"Analysis finished.\nView results at: {final_csv_path}",
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Results not saved",
+                    "Results were not saved because the file stayed open/locked.\n"
+                    f"No changes were written to:\n{final_csv_path}",
+                )
         else:
             QMessageBox.information(self, "Analysis complete", "Analysis finished. No results were saved.")
         # Return to the parameter page once analysis completes
         self.show_workspace(False)
+
+    def _save_results_with_retry(self, df, path) -> bool:
+        """Save the results CSV, prompting the user to close the file if it is
+        locked (e.g. open in Excel) and retrying until it succeeds. Returns True
+        once saved, or False if the user chooses to cancel.
+
+        On Windows an open Excel file locks the CSV, so ``to_csv`` raises and -- in
+        the windowed build with no console -- the failure would otherwise be silent.
+        """
+        while True:
+            try:
+                df.to_csv(path, index=False, na_rep="NA")
+                return True
+            except OSError as exc:
+                choice = QMessageBox.warning(
+                    self,
+                    "Cannot save results",
+                    "Please close your current results Excel file to save the new "
+                    f"results, then press Retry.\n\nFile:\n{path}\n\n({exc})",
+                    QMessageBox.Retry | QMessageBox.Cancel,
+                    QMessageBox.Retry,
+                )
+                if choice != QMessageBox.Retry:
+                    return False
 
     def pre_draw_roi_action(self) -> None:
         """Launch the interactive pre-ROI drawing workflow.
